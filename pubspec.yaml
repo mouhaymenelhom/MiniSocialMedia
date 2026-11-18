@@ -1,0 +1,32 @@
+name: mini_reseau_social
+description: Mini réseau social (statuts, photos, amitiés) - ISAE Gafsa, Mini-projet 2.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  provider: ^6.1.2
+  intl: ^0.19.0
+  image_picker: ^1.1.2
+  cached_network_image: ^3.4.1
+
+  # --- Firebase : à activer lors de l'intégration (voir DOCUMENTATION.txt §9) ---
+  # firebase_core: ^3.6.0
+  # firebase_auth: ^5.3.1
+  # cloud_firestore: ^5.4.4
+  # firebase_storage: ^12.3.4
+  # firebase_ai: ^2.0.0
+  # firebase_app_check: ^0.3.1
+  # flutter_image_compress: ^2.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true

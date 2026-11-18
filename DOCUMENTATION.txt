@@ -1,0 +1,1124 @@
+================================================================================
+ MINI RÉSEAU SOCIAL - FRONT-END FLUTTER / DART
+ ISAE Gafsa - Développement Mobile - Mini-projet 2
+ Documentation technique : modules, architecture MVCS, intégration Firebase
+ et guide de la syntaxe Dart
+================================================================================
+
+SOMMAIRE
+  1.  Présentation
+  2.  Installation et lancement
+  3.  Architecture MVCS
+  4.  Arborescence du projet
+  5.  Module core
+  6.  Module models
+  7.  Module services
+  8.  Modules controllers, views, routage et injection de dépendances
+  9.  Intégration de Firebase
+  10. La syntaxe Dart expliquée
+  11. Concepts Flutter utilisés
+  12. Tests, qualité, limites et évolutions
+
+
+================================================================================
+1. PRÉSENTATION
+================================================================================
+
+Ce projet est le FRONT-END complet du « Mini réseau social » décrit dans le
+cahier des charges : une communauté restreinte partage des statuts et des
+photos entre amis (pas de messagerie : « J'aime » et commentaires).
+
+Le backend n'est pas encore branché. Pour que l'application fonctionne et
+puisse être démontrée dès maintenant, les services sont simulés en mémoire
+(dossier lib/services/mock/). Les classes à compléter pour Firebase existent
+déjà (dossier lib/services/firebase/) : il suffira de les implémenter, puis de
+passer un interrupteur à « true » (AppConfig.useFirebase).
+
+Fonctionnalités du cahier des charges couvertes côté interface :
+
+  F1  Compte et profil ........ connexion, inscription, modification du profil
+                                (nom, photo, biographie), déconnexion
+  F2  Recherche de membres .... recherche par nom, profil avec l'état de la
+                                relation (ami, demande envoyée, demande reçue)
+  F3  Demandes d'amitié ....... envoyer, annuler, accepter, refuser, retirer
+  F4  Publication ............. texte + 1 à 4 photos (galerie ou appareil),
+                                visibilité Amis / Public
+  F5  Fil d'actualité ......... temps réel, du plus récent au plus ancien,
+                                pages de 10 (défilement infini)
+  F6  Réactions ............... « J'aime » unique par membre, commentaires,
+                                compteurs à jour
+  F7  Gestion des publications  modifier le texte, supprimer
+  F8  Modération et légendes .. vérification avant mise en ligne, refus avec
+                                raison, statut « en attente » si l'IA ne
+                                répond pas, trois légendes proposées
+  F9  Notifications (bonus) ... NON implémenté (voir §12)
+  F10 Signalement (bonus) ..... NON implémenté (voir §12)
+
+Ce qui relève du backend (règles de sécurité Firestore/Storage, compression
+réelle des photos, appel réel à Firebase AI Logic) est décrit au §9.
+
+
+================================================================================
+2. INSTALLATION ET LANCEMENT
+================================================================================
+
+2.1 Prérequis
+  - Flutter SDK stable récent (Dart 3.3 ou plus) ;
+  - Android Studio ou VS Code avec les extensions Flutter et Dart ;
+  - un émulateur Android ou un téléphone en mode développeur.
+
+2.2 Générer les dossiers de plateforme
+Le projet fournit le code (lib/, pubspec.yaml, test/). Les dossiers android/,
+ios/, etc. se génèrent avec Flutter. Dans le dossier du projet :
+
+    flutter create --org tn.isae --project-name mini_reseau_social .
+    flutter pub get
+    flutter run
+
+(Le point final est important : il indique « dans ce dossier ». La commande
+ne remplace pas lib/ ni pubspec.yaml s'ils existent déjà ; si Flutter propose
+d'écraser lib/main.dart, refusez, ou regénérez les fichiers depuis l'archive.)
+
+2.3 Permissions Android (photos / appareil photo)
+Dans android/app/src/main/AndroidManifest.xml, avant la balise <application> :
+
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-permission android:name="android.permission.INTERNET"/>
+
+Le plugin image_picker utilise le sélecteur système pour la galerie : aucune
+autre permission n'est nécessaire sur les versions récentes d'Android.
+Sur iOS, ajouter NSCameraUsageDescription et NSPhotoLibraryUsageDescription
+dans ios/Runner/Info.plist.
+
+2.4 Comptes de démonstration (services simulés)
+  amal@isae.tn     mot de passe 123456   (amie de Bilel)
+  bilel@isae.tn    mot de passe 123456   (amie d'Amal)
+  chaima@isae.tn   mot de passe 123456   (sans lien d'amitié)
+Il est aussi possible de créer un compte depuis l'écran d'inscription.
+
+Remarque : en mode simulé, les données vivent en mémoire d'UN seul appareil et
+disparaissent à la fermeture de l'application. La démonstration à plusieurs
+appareils (section 8 du cahier des charges) nécessite Firebase ; en attendant,
+on peut jouer le scénario sur un appareil en se déconnectant / reconnectant.
+
+2.5 Astuces pour tester la modération simulée
+  - un texte contenant un numéro de téléphone (8 chiffres ou plus) est refusé
+    avec la raison affichée ;
+  - les mots « tuer », « frapper », « idiot », « haine » sont refusés ;
+  - un texte contenant #ia-indisponible simule une panne de l'IA : la
+    publication est enregistrée avec le statut « en attente » (visible de son
+    seul auteur, bandeau explicatif sur la carte).
+
+
+================================================================================
+3. ARCHITECTURE MVCS
+================================================================================
+
+MVCS = Model - View - Controller - Service. C'est un MVC dans lequel
+l'accès aux données et aux API externes est sorti des contrôleurs et placé dans
+une couche dédiée, les Services. Chaque couche a UNE responsabilité.
+
+   +--------+   événements    +--------------+   appels    +-----------+
+   |  View  | --------------> |  Controller  | ----------> |  Service  |
+   | (écran,|                 | (état + logique               (interface)
+   | widget)| <-------------- |  de présentation)| <------  |  Firebase  |
+   +--------+  notifyListeners +--------------+   flux/    |  ou Mock   |
+        ^                            |            futures   +-----------+
+        |                            v
+        |                       +---------+
+        +-----------------------|  Model  |  (classes de données pures)
+              lecture           +---------+
+
+  MODEL      Classes de données immuables (AppUser, Post, Comment,
+             FriendRequest, ModerationResult) et énumérations. Aucune
+             dépendance à Flutter (sauf @immutable de foundation) ni à
+             Firebase. Elles savent se convertir depuis/vers une Map
+             (fromMap / toMap), format utilisé par Firestore.
+
+  VIEW       Écrans (views/screens) et composants (views/widgets). Ils
+             affichent l'état du contrôleur et lui transmettent les actions de
+             l'utilisateur. Aucune logique métier, aucun appel à un service.
+
+  CONTROLLER Classes qui étendent ChangeNotifier (paquet provider). Elles
+             détiennent l'état d'un écran (liste, chargement, erreur), appellent
+             les services et préviennent la vue avec notifyListeners().
+
+  SERVICE    Interfaces (classes abstraites « interface ») qui décrivent ce que
+             fait le backend : AuthService, PostService, etc. Deux familles
+             d'implémentations : mock/ (en mémoire) et firebase/ (à écrire).
+
+Règles de dépendance (sens autorisé uniquement) :
+
+      View  ->  Controller  ->  Service (interface)  ->  Model
+                                   ^
+                    Mock / Firebase implémentent l'interface
+
+  - Une vue ne parle jamais à un service (exigence du cahier des charges :
+    « les appels à Firebase et à l'IA passent par un service, jamais
+    directement depuis un widget »).
+  - Un contrôleur ne connaît que les INTERFACES de services, jamais Firebase.
+    C'est ce qui rend le code évolutif : changer de backend = changer
+    l'implémentation fournie dans core/di/app_providers.dart.
+  - Un modèle ne connaît personne.
+
+Pourquoi c'est scalable :
+  - ajouter une fonctionnalité = ajouter un modèle, une méthode de service, un
+    contrôleur et un écran, sans toucher au reste ;
+  - les contrôleurs et services sont testables sans interface graphique ;
+  - le fil est paginé (limite croissante) : le coût ne dépend pas du volume ;
+  - les données affichées dans une carte sont dénormalisées (nom et photo de
+    l'auteur) pour éviter une lecture par carte.
+
+
+================================================================================
+4. ARBORESCENCE DU PROJET
+================================================================================
+
+mini_reseau_social/
+|-- pubspec.yaml                 dépendances (Firebase en commentaire)
+|-- analysis_options.yaml        règles de style (flutter_lints + règles en plus)
+|-- DOCUMENTATION.txt            ce fichier
+|-- test/
+|   `-- moderation_result_test.dart   tests unitaires (validation de l'IA, etc.)
+`-- lib/
+    |-- main.dart                point d'entrée
+    |-- app.dart                 MaterialApp, thèmes, routage, providers
+    |-- core/                    code transversal
+    |   |-- constants/           app_config, app_constants, app_strings, app_routes
+    |   |-- di/                  app_providers (injection de dépendances)
+    |   |-- errors/              app_exception
+    |   |-- routing/             app_router
+    |   |-- theme/               app_theme
+    |   `-- utils/               validators, date_formatter, string_extensions,
+    |                            image_source, map_converters
+    |-- models/                  enums, app_user, post, comment, friend_request,
+    |                            moderation_result
+    |-- services/
+    |   |-- *.dart               interfaces (auth, user, friendship, post,
+    |   |                        storage, ai_moderation, photo_picker)
+    |   |-- mock/                implémentations en mémoire (démo sans backend)
+    |   `-- firebase/            emplacements à compléter pour Firebase
+    |-- controllers/             base_controller, post_list_controller,
+    |                            auth, feed, post_detail, friends, profile,
+    |                            post_composer, settings
+    `-- views/
+        |-- screens/             un fichier par écran
+        |-- widgets/             composants réutilisables
+        `-- extensions/          libellés/icônes des énumérations
+
+
+================================================================================
+5. MODULE core
+================================================================================
+
+core/constants/app_config.dart
+  AppConfig.useFirebase : interrupteur unique. false = services simulés,
+  true = services Firebase. Lu par core/di/app_providers.dart et par
+  FirebaseBootstrap.
+
+core/constants/app_constants.dart
+  Valeurs du cahier des charges : taille de page (10), nombre maximal de photos
+  (4), longueurs maximales, délai d'attente de l'IA (15 s), côté des photos
+  envoyées à l'IA (512 px), délai d'anti-rebond de la recherche.
+  Aucun « nombre magique » n'est écrit dans le code : on les change ici.
+
+core/constants/app_strings.dart
+  Textes partagés par plusieurs couches (messages de validation, erreur
+  générique). Les libellés propres à un écran sont écrits dans l'écran ; pour
+  une application multilingue, on migrerait tout vers les fichiers ARB de
+  flutter_localizations.
+
+core/constants/app_routes.dart
+  Noms des routes nommées (/register, /new-post, /post, /profile, /settings).
+
+core/errors/app_exception.dart
+  AppException : erreur métier dont le message est affichable. Les services la
+  lèvent ; BaseController l'attrape et la transforme en errorMessage.
+
+core/theme/app_theme.dart
+  Thèmes clair et sombre Material 3 générés depuis une couleur source
+  (ColorScheme.fromSeed).
+
+core/utils/validators.dart
+  Validateurs de formulaire (e-mail, mot de passe, champ obligatoire, longueur,
+  confirmation). Contrat : retourner null si valide, sinon le message d'erreur.
+
+core/utils/date_formatter.dart
+  DateFormatter.relative : « il y a 5 min », « il y a 2 h », date complète
+  au-delà d'une semaine.
+
+core/utils/string_extensions.dart
+  Extension String.initials (avatar de secours quand il n'y a pas de photo).
+
+core/utils/image_source.dart
+  Distingue une URL distante d'un chemin local et fournit l'ImageProvider.
+
+core/utils/map_converters.dart
+  parseDate : convertit un champ date (DateTime, texte ISO, entier ou Timestamp
+  Firestore) en DateTime, sans importer cloud_firestore.
+
+core/di/app_providers.dart
+  Construit la liste des « providers » : services (mock ou Firebase selon
+  AppConfig), sélecteur de photos, puis AuthController. Voir §8.5.
+
+core/routing/app_router.dart
+  Table de routage (onGenerateRoute) : nom de route -> écran, avec passage
+  d'arguments (identifiant de publication ou de membre).
+
+
+================================================================================
+6. MODULE models
+================================================================================
+
+models/enums.dart
+  PostVisibility        friends | public            (champ « visibilite »)
+  PostStatus            published | pending | rejected
+                        (valeurs Firestore : publiee, en_attente, refusee)
+  ModerationCategory    none, violence, harassment, hate, sexualContent,
+                        personalData (valeurs : aucune, violence, harcelement,
+                        haine, contenu_sexuel, donnees_personnelles)
+                        tryParse retourne null si la valeur n'est pas autorisée.
+  RelationshipStatus    self | none | friends | requestSent | requestReceived
+  FriendRequestStatus   pending | accepted | declined
+
+models/app_user.dart  (users/{uid})
+  uid, name, photoUrl, bio, friendCount. fromMap/toMap utilisent les noms de
+  champs du cahier des charges (nom, nomMinuscule, photoUrl, bio, nbAmis).
+  copyWith crée une copie modifiée (les objets sont immuables).
+  Les opérateurs == et hashCode comparent les valeurs : indispensable pour que
+  Stream.distinct() n'émette pas deux fois le même profil.
+
+models/post.dart  (posts/{id})
+  id, authorId, authorName, authorPhotoUrl (dénormalisés), text, photoUrls,
+  visibility, status, likeCount, commentCount, createdAt et likedByViewer.
+  likedByViewer n'est PAS stocké : c'est une donnée propre au lecteur, calculée
+  par le service (existence du document posts/{id}/jaime/{uid}).
+
+models/comment.dart  (posts/{id}/commentaires/{id})
+  id, authorId, authorName, authorPhotoUrl, text, createdAt.
+
+models/friend_request.dart  (demandes/{de_a})
+  fromUid, toUid, noms et photos dénormalisés, status, createdAt.
+  id = « de_a » : un document par couple, donc impossible d'envoyer deux fois
+  la même demande (critère d'acceptation du cahier des charges).
+
+models/moderation_result.dart
+  ModerationResult.fromJson valide la réponse de l'IA : « publiable » doit être
+  un booléen, « categorie » doit appartenir à la liste autorisée, sinon une
+  FormatException est levée (l'application ne fait jamais confiance à l'IA).
+  parseCaptionSuggestions valide {"legendes": [...]} et garde trois légendes.
+
+
+================================================================================
+7. MODULE services
+================================================================================
+
+Chaque service est une interface (« abstract interface class ») : elle liste
+les opérations, sans dire comment elles sont réalisées.
+
+AuthService          currentUser, authStateChanges (flux), signIn, register,
+                     signOut.
+UserService          watchUser (flux), searchByName, updateProfile.
+FriendshipService    watchRelationship, watchFriends, watchReceivedRequests,
+                     watchSentRequests, sendRequest, cancelRequest,
+                     acceptRequest, declineRequest, removeFriend.
+PostService          watchFeed(limit), watchUserPosts, watchPost, createPost,
+                     updatePostText, deletePost, toggleLike, watchComments,
+                     addComment.
+StorageService       uploadPostPhotos, uploadAvatar (compression + envoi).
+AiModerationService  moderate (texte + photos), suggestCaptions.
+PhotoPickerService   pickFromGallery, takePhoto. Seul service « d'appareil »
+                     réellement implémenté (ImagePickerService, plugin
+                     image_picker) ; il sert aussi avec Firebase.
+
+Convention : les méthodes watchXxx retournent un Stream (temps réel), les
+autres un Future (une opération ponctuelle).
+
+7.1 services/mock/  (démo sans backend)
+  MockDatabase est une « fausse base » en mémoire : tables (Map), règles de
+  visibilité (une publication « Amis » n'est visible que de son auteur et de ses
+  amis ; en_attente et refusee uniquement de l'auteur), compteurs, et la méthode
+  watch(query) qui émet le résultat d'une requête puis le ré-émet à chaque
+  modification : c'est l'équivalent des snapshots() de Firestore.
+  Les autres classes (MockAuthService, MockUserService, MockFriendshipService,
+  MockPostService, MockStorageService, MockAiModerationService) implémentent
+  les interfaces en s'appuyant dessus et ajoutent une latence artificielle pour
+  tester les états de chargement.
+
+7.2 services/firebase/  (à compléter)
+  Une classe par service, avec la liste précise des étapes à réaliser en
+  commentaire (TODO(firebase)). Toutes les méthodes lèvent UnimplementedError
+  tant qu'elles ne sont pas écrites. Détails au §9.
+
+
+================================================================================
+8. MODULES controllers, views, ROUTAGE ET INJECTION
+================================================================================
+
+8.1 controllers/
+
+BaseController
+  Classe de base de tous les contrôleurs :
+   - isBusy / errorMessage ;
+   - runGuarded(action) : exécute une action asynchrone, gère « occupé »,
+     convertit AppException en message utilisateur, toute autre erreur en
+     message générique, et retourne true/false ;
+   - notifyListeners() sécurisé : ignoré après dispose (évite l'erreur
+     classique « setState/notify after dispose » quand une réponse arrive trop
+     tard).
+
+PostListController (étend BaseController)
+  Actions communes à tout écran qui montre des publications : toggleLike,
+  deletePost, updatePostText. Hérité par FeedController, ProfileController et
+  PostDetailController : zéro duplication.
+
+AuthController (global, créé à la racine)
+  Écoute authStateChanges et expose status (unknown, authenticated,
+  unauthenticated) et currentUser. signIn, register, signOut.
+
+FeedController (F5)
+  S'abonne à PostService.watchFeed(limit). « loadMore » augmente la limite de
+  10 et se ré-abonne ; hasMore vaut true tant que le service renvoie autant
+  d'éléments que demandé. refresh revient à la première page.
+
+PostDetailController (F6)
+  Écoute la publication et ses commentaires ; addComment ; isUnavailable quand
+  la publication a été supprimée (scénario de démonstration, étape 6).
+
+FriendsController (F2, F3)
+  Écoute amis, demandes reçues et envoyées ; recherche avec anti-rebond
+  (Timer) et protection contre les réponses obsolètes (si la requête a changé
+  pendant l'attente, le résultat est ignoré) ; actions sur les demandes.
+
+ProfileController (F2, F3)
+  Profil d'un membre : informations, relation avec le lecteur, publications
+  paginées, actions d'amitié. Sert aussi pour son propre profil (relation self).
+
+PostComposerController (F4, F8)
+  État du formulaire de publication : texte (TextEditingController), photos
+  (4 maximum), visibilité, suggestions de légendes, refus de modération.
+  publish() applique le flux de la section 4.1 du cahier des charges :
+    1. moderate(texte, photos) avec délai maximal ;
+    2. publiable = true  -> statut « publiee » ;
+    3. publiable = false -> on retourne PublishOutcome.rejected, la raison est
+       affichée et rien n'est enregistré ;
+    4. erreur / délai dépassé / réponse invalide -> statut « en_attente » ;
+    5. envoi des photos puis création de la publication.
+  Aucune publication n'est donc visible des autres sans avoir passé la
+  modération.
+
+SettingsController (F1)
+  Modification du profil (nom, biographie, nouvelle photo).
+
+8.2 views/screens/  (un fichier par écran du cahier des charges)
+
+  auth_gate.dart        choisit l'écran selon AuthController.status
+  splash_screen.dart    écran d'attente au démarrage
+  login_screen.dart     connexion (validation des champs, erreur affichée)
+  register_screen.dart  inscription (confirmation du mot de passe)
+  home_shell.dart       barre de navigation à trois onglets et création des
+                        contrôleurs liés à l'utilisateur (détruits à la
+                        déconnexion)
+  feed_screen.dart      fil, défilement infini, tirer pour rafraîchir, bouton +
+  new_post_screen.dart  nouvelle publication, légendes, « Vérification… »
+  post_detail_screen.dart  photos en grand, commentaires, champ de saisie
+  profile_screen.dart   profil + bouton selon la relation + publications
+  friends_screen.dart   onglets Amis / Reçues / Envoyées + recherche
+  settings_screen.dart  modification du profil, déconnexion
+
+Schéma « écran + vue privée » : chaque écran qui possède un contrôleur est
+composé d'un widget public qui CRÉE le contrôleur
+(ChangeNotifierProvider) et d'un widget privé (_XxxView) qui le LIT. Le
+contrôleur vit donc exactement le temps de l'écran.
+
+8.3 views/widgets/  (composants réutilisables)
+
+  PostCard         carte de publication, 100 % présentationnelle (callbacks)
+  PostItem<T>      relie une PostCard au contrôleur T (fil, profil ou détail) :
+                   navigation, J'aime, modification, suppression
+  PhotoCarousel    PageView + points indicateurs
+  AppImage         image réseau (cache + indicateur de chargement) ou locale
+  UserAvatar       photo ou initiales
+  UserTile         ligne de liste d'un membre
+  RelationshipButton  Ajouter / Demande envoyée / Accepter-Refuser / Amis /
+                   Modifier le profil, selon RelationshipStatus
+  CommentTile      un commentaire
+  LoadingView, EmptyView, ErrorView   états d'écran
+  feedback.dart    reportIfFailed (affiche l'erreur d'un contrôleur),
+                   showMessage (SnackBar), confirmAction (boîte de dialogue)
+  edit_post_dialog.dart  modification du texte d'une publication
+
+views/extensions/enum_labels.dart
+  Libellés et icônes des énumérations (« Amis », « Public »). Ils sont dans
+  la vue car la couche modèle ne doit pas dépendre de l'interface.
+
+Accessibilité : étiquettes sémantiques (Semantics), info-bulles (tooltip) sur
+les boutons-icônes, compteurs lus avec leur sens (« 3 J'aime »), thème sombre.
+
+8.4 Routage (core/routing/app_router.dart)
+  Navigator avec routes nommées. Arguments : l'identifiant de publication
+  (String) pour /post, l'identifiant de membre (String) pour /profile.
+  Les routes poussées s'empilent au-dessus de AuthGate ; lors d'une
+  déconnexion, l'écran Paramètres dépile jusqu'à la racine (popUntil) avant de
+  fermer la session.
+
+8.5 Injection de dépendances (core/di/app_providers.dart)
+  Le paquet provider place les objets « au-dessus » de l'application ; tout
+  widget peut les récupérer avec context.read<T>() (lecture ponctuelle),
+  context.watch<T>() (lecture + reconstruction à chaque changement) ou
+  context.select (reconstruction seulement si la valeur choisie change).
+  Les services sont fournis PAR LEUR INTERFACE :
+      Provider<AuthService>(create: (_) => MockAuthService(...))
+  Les contrôleurs reçoivent leurs dépendances dans leur constructeur
+  (injection par constructeur), ce qui permet de les tester avec de faux
+  services.
+
+8.6 Exemple de flux complet : « J'aime »
+  1. L'utilisateur touche le cœur d'une PostCard.
+  2. PostItem appelle controller.toggleLike(post) (FeedController).
+  3. Le contrôleur appelle PostService.toggleLike(...) via runGuarded.
+  4. Le service écrit (document jaime/{uid} + compteur).
+  5. Le flux watchFeed ré-émet la liste ; FeedController._onPosts met à jour
+     son état et appelle notifyListeners().
+  6. FeedScreen (context.watch) se reconstruit ; le cœur et le compteur
+     changent. Chez l'AUTRE utilisateur, le même flux se met à jour : c'est le
+     temps réel.
+
+
+================================================================================
+9. INTÉGRATION DE FIREBASE
+================================================================================
+
+Principe : on n'écrit PAS Firebase dans les contrôleurs ni les vues. On
+complète les classes de lib/services/firebase/ puis on active l'interrupteur.
+
+9.1 Étapes
+  1. Créer un projet Firebase (console.firebase.google.com) et ajouter
+     l'application Android (nom de paquet tn.isae.mini_reseau_social si vous
+     avez suivi §2.2).
+  2. Installer la CLI : dart pub global activate flutterfire_cli, puis
+        flutterfire configure
+     Cela génère lib/firebase_options.dart et configure Android.
+  3. Dans pubspec.yaml, décommenter les dépendances Firebase, puis
+        flutter pub get
+  4. Dans lib/services/firebase/firebase_bootstrap.dart, décommenter
+     l'initialisation (Firebase.initializeApp, App Check) et ajouter les
+     imports firebase_core, firebase_app_check et firebase_options.
+  5. Activer dans la console : Authentication (e-mail/mot de passe), Cloud
+     Firestore, Cloud Storage, Firebase AI Logic (fournisseur Gemini Developer
+     API) et App Check.
+  6. Implémenter les six classes Firebase*Service (voir 9.2).
+  7. Passer AppConfig.useFirebase à true (core/constants/app_config.dart).
+  8. Publier les règles de sécurité (9.4) et créer les index (9.5).
+
+Vérifier avant de commencer (cahier des charges, §7) : les offres gratuites
+évoluent ; Cloud Storage peut exiger le forfait Blaze, sinon Supabase Storage
+est une alternative (il suffit alors d'implémenter StorageService autrement :
+aucune autre couche ne change).
+
+9.2 Ce que doit faire chaque service Firebase
+  FirebaseAuthService
+    - signIn / register : FirebaseAuth ; à l'inscription, créer users/{uid}.
+    - authStateChanges : combiner FirebaseAuth.authStateChanges() avec le
+      snapshots() du document users/{uid} (pour que la photo et le nom à jour
+      arrivent dans AuthController).
+    - convertir FirebaseAuthException en AppException (messages français).
+  FirebaseUserService
+    - watchUser : doc(uid).snapshots().map(...AppUser.fromMap(data, id: uid)).
+    - searchByName : requête de préfixe sur nomMinuscule.
+  FirebaseFriendshipService
+    - sendRequest : transaction qui vérifie qu'aucun document de_a / a_de
+      n'existe, lit les deux profils (pour dénormaliser les noms), crée de_a.
+    - acceptRequest : WriteBatch atomique : supprimer la demande, écrire
+      users/{a}/amis/{de} ET users/{de}/amis/{a}, incrémenter nbAmis des deux.
+    - removeFriend : batch symétrique.
+  FirebasePostService
+    - watchFeed : voir 9.3.
+    - createPost : écrit avec le statut calculé par le contrôleur.
+    - toggleLike : transaction (créer/supprimer jaime/{uid} + nbJaime).
+    - addComment : transaction (commentaire + nbCommentaires).
+    - deletePost : supprimer le document, ses sous-collections ET ses photos
+      (Storage).
+    - likedByViewer : lire jaime/{viewerId} pour chaque publication.
+  FirebaseStorageService
+    - compresser avec flutter_image_compress, envoyer vers
+      users/{uid}/posts/{uuid}.jpg, retourner getDownloadURL().
+  FirebaseAiModerationService
+    - appel via firebase_ai (aucune clé d'API dans le code), réponse JSON
+      imposée, puis ModerationResult.fromJson (déjà prêt) ; photos réduites à
+      AppConstants.aiPhotoMaxSide pixels ; seules les données nécessaires sont
+      envoyées. Ne PAS attraper les erreurs : le contrôleur gère le statut
+      « en attente » et le délai.
+
+9.3 Construire le fil (choix à justifier dans le rapport)
+  Option A : requête whereIn sur la liste des amis (30 valeurs maximum par
+  requête) + publications publiques ; simple, mais limitée à 30 amis par
+  requête (il faut découper en plusieurs requêtes et fusionner).
+  Option B : copier chaque publication dans un fil propre à chaque membre
+  (users/{uid}/fil/{postId}) ; lecture très rapide et pagination simple, mais
+  écritures multipliées par le nombre d'amis.
+  Dans les deux cas, l'interface de PostService ne change pas : seul
+  FirebasePostService.watchFeed est concerné.
+
+9.4 Règles de sécurité Firestore (point de départ à adapter)
+
+    rules_version = '2';
+    service cloud.firestore {
+      match /databases/{database}/documents {
+
+        function signedIn() { return request.auth != null; }
+        function isFriend(a, b) {
+          return exists(/databases/$(database)/documents/users/$(a)/amis/$(b));
+        }
+
+        match /users/{uid} {
+          allow read: if signedIn();
+          allow create, update: if request.auth.uid == uid;
+          match /amis/{aid} {
+            allow read: if request.auth.uid == uid;
+            // écrit par transaction/batch d'acceptation (voir remarque)
+          }
+        }
+
+        match /demandes/{id} {
+          allow read: if signedIn() &&
+            (resource.data.de == request.auth.uid ||
+             resource.data.a  == request.auth.uid);
+          allow create: if request.auth.uid == request.resource.data.de
+                        && id == request.resource.data.de + '_' + request.resource.data.a;
+          allow delete: if request.auth.uid == resource.data.de ||
+                           request.auth.uid == resource.data.a;
+        }
+
+        match /posts/{postId} {
+          allow read: if signedIn() && (
+            resource.data.auteur == request.auth.uid ||
+            (resource.data.statut == 'publiee' &&
+             (resource.data.visibilite == 'public' ||
+              isFriend(request.auth.uid, resource.data.auteur))));
+          allow create: if request.auth.uid == request.resource.data.auteur;
+          allow update, delete: if request.auth.uid == resource.data.auteur;
+          // « jaime » : id du document == request.auth.uid (un seul J'aime)
+          match /jaime/{uid} {
+            allow read: if signedIn();
+            allow create, delete: if request.auth.uid == uid;
+          }
+          match /commentaires/{cid} {
+            allow read: if signedIn();
+            allow create: if request.auth.uid == request.resource.data.auteur;
+            allow delete: if request.auth.uid == resource.data.auteur;
+          }
+        }
+      }
+    }
+
+  Remarques importantes :
+   - ces règles sont un SQUELETTE : les compteurs (nbJaime, nbAmis...) et
+     l'écriture croisée des amitiés exigent soit des règles plus fines
+     (vérification des champs modifiés), soit des Cloud Functions (forfait
+     Blaze) ;
+   - le critère d'acceptation « un non-ami ne peut pas lire une publication
+     Amis, même par requête directe » est assuré par ces règles, pas par
+     l'interface : testez-le avec l'émulateur Firebase.
+   - vérifier aussi que la publication « en_attente » n'est lisible que par
+     son auteur.
+
+  Règles Storage (squelette) :
+    match /b/{bucket}/o {
+      match /users/{uid}/{allPaths=**} {
+        allow read: if request.auth != null;
+        allow write: if request.auth.uid == uid
+                     && request.resource.size < 2 * 1024 * 1024
+                     && request.resource.contentType.matches('image/.*');
+      }
+    }
+
+9.5 Index
+  La requête « publications triées par creeLe » combinée à des filtres
+  (visibilité, statut, auteur) demande des index composites : Firestore affiche
+  dans la console d'erreur un lien de création automatique au premier essai.
+
+9.6 Données temps réel et dates
+  Les modèles lisent les dates avec parseDate, qui accepte le Timestamp de
+  Firestore sans autre conversion. À l'écriture, utiliser
+  FieldValue.serverTimestamp() pour creeLe côté serveur.
+
+9.7 Hors périmètre de cette livraison (à faire ensuite)
+  - nouvelle vérification des publications « en_attente » (une méthode
+    PostService.updateStatus + un déclencheur au retour du réseau) ;
+  - notifications (F9) et signalement (F10) ;
+  - rapport : 10 cas de modération testés et commentaires sur les erreurs.
+
+
+================================================================================
+10. LA SYNTAXE DART EXPLIQUÉE (avec des exemples tirés du projet)
+================================================================================
+
+Dart est un langage typé, orienté objet, compilé. Les exemples ci-dessous
+viennent du code du projet ; le fichier est indiqué entre crochets.
+
+--------------------------------------------------------------------------------
+10.1 Structure d'un programme et des fichiers
+--------------------------------------------------------------------------------
+  - Point d'entrée : la fonction main() [lib/main.dart].
+  - Un fichier = une « bibliothèque ». On importe avec import :
+        import 'package:flutter/material.dart';              // paquet externe
+        import 'package:mini_reseau_social/models/post.dart'; // ce projet
+        import 'dart:async';                                  // bibliothèque Dart
+  - Les instructions se terminent par un point-virgule ; les blocs par { }.
+  - Commentaires : // une ligne, /* plusieurs lignes */, et /// pour la
+    documentation (affichée par l'éditeur au survol).
+  - Convention de noms : UpperCamelCase pour les types (class AppUser),
+    lowerCamelCase pour variables, méthodes et paramètres (friendCount),
+    snake_case pour les noms de fichiers (app_user.dart).
+  - Confidentialité : un nom qui commence par _ est privé à SON FICHIER
+    (_posts, _subscribe, class _ProfileView). Il n'y a pas de mot-clé private.
+
+--------------------------------------------------------------------------------
+10.2 Variables et constantes
+--------------------------------------------------------------------------------
+    var count = 0;               // type déduit (int) ; réassignable
+    int count = 0;               // type explicite
+    final name = 'Amal';         // assignée UNE fois, à l'exécution
+    const maxPhotos = 4;         // constante connue À LA COMPILATION
+    late final StreamSubscription<AppUser?> _subscription;
+                                  // initialisée plus tard, une seule fois
+                                  // [auth_controller.dart]
+  - final : la variable ne change plus (l'objet pointé peut rester modifiable).
+  - const : valeur et objet entièrement constants ; les widgets const sont
+    réutilisés par Flutter, donc plus rapides : const SizedBox(height: 8).
+  - Règle du projet (prefer_final_locals) : final par défaut.
+
+--------------------------------------------------------------------------------
+10.3 Types de base
+--------------------------------------------------------------------------------
+    int          42                  entier
+    double       3.14                décimal
+    num          int ou double
+    bool         true / false
+    String       'texte' ou "texte"
+    List<T>      [1, 2, 3]           liste ordonnée
+    Set<T>       {1, 2, 3}           ensemble sans doublon
+    Map<K, V>    {'nom': 'Amal'}     dictionnaire
+    dynamic      type inconnu (à éviter)
+    Object       parent de tous les types
+    void         « ne retourne rien »
+    Duration, DateTime               durée et date
+
+  Chaînes :
+    'Bonjour $name'                  interpolation simple
+    'Il y a ${difference.inMinutes} min'   interpolation d'une expression
+    r'^[^@\s]+@[^@\s]+\.[^@\s]+$'    chaîne brute (r) : \ n'est pas un échappement
+    "à l'instant"                    guillemets doubles pour contenir une apostrophe
+
+--------------------------------------------------------------------------------
+10.4 Null safety (sécurité vis-à-vis de null)
+--------------------------------------------------------------------------------
+Par défaut, un type NE PEUT PAS valoir null. Un « ? » l'autorise :
+
+    String name;            // jamais null
+    String? photoUrl;       // peut être null           [app_user.dart]
+
+  Opérateurs :
+    a ?? b      valeur de a, sinon b si a est null
+                map['bio'] as String? ?? ''            [app_user.dart]
+    a?.b        accès à b seulement si a n'est pas null
+                user?.copyWith(...)                    [mock_database.dart]
+    a!          « je garantis que a n'est pas null » (lève une erreur sinon)
+                context.read<AuthController>().currentUser!.uid
+    a ??= b     affecte b si a est null
+    ?.call()    appelle une fonction nullable : onEdit?.call()
+    if (x is! bool) { ... }     test de type avec négation
+  Promotion de type : après if (value == null) return ..., le compilateur sait
+  que value n'est plus null dans la suite.
+
+--------------------------------------------------------------------------------
+10.5 Opérateurs et contrôle de flux
+--------------------------------------------------------------------------------
+  Arithmétiques + - * / ~/ (division entière) %, comparaison == != < > <= >=,
+  logiques && || !, conditionnel  cond ? a : b, incrément ++ -- et ++x.
+    _idCounter++ ;   '${prefix}_${++_idCounter}'   // pré-incrément
+
+  Structures :
+    if (...) { } else if (...) { } else { }
+    for (var i = 0; i < n; i++) { }
+    for (final post in posts) { }        // for-in : parcours d'une collection
+    while (cond) { }
+    switch (x) { case A: ... }           // voir 10.16 pour la version moderne
+    break, continue, return
+
+--------------------------------------------------------------------------------
+10.6 Collections
+--------------------------------------------------------------------------------
+    final posts = <Post>[];                   // liste vide typée
+    final ids   = <String>{};                 // Set
+    final byId  = <String, Post>{};           // Map
+
+    list.add(x);  list.remove(x);  list.contains(x);  list.length
+    map[key] = value;   map.putIfAbsent(key, () => <String>{});
+    map.values   map.keys   map.entries   map.containsKey(key)
+
+  Méthodes fonctionnelles (sur tout Iterable) :
+    posts.where((p) => p.status == PostStatus.published)   // filtrer
+    posts.map((p) => p.id)                                 // transformer
+    posts.take(10)                                         // les 10 premiers
+    names.any((n) => n.isEmpty)                            // au moins un ?
+    values.firstWhere((e) => e.value == v, orElse: () => friends)
+    ....toList()                  // un Iterable est paresseux : on matérialise
+    list.whereType<AppUser>()     // garde les éléments non null / du bon type
+
+  Spread et collections dynamiques (dans un littéral) :
+    [...a, ...b]                              // « étale » deux listes
+    [ if (count > 1) _Dot(), for (var i = 0; i < n; i++) Text('$i') ]
+                                              // if et for DANS la liste
+    if (auth.errorMessage != null) ...<Widget>[ ... ]
+                                              // spread conditionnel [login_screen]
+
+  Listes immuables : List<String>.unmodifiable(_photoPaths) ;
+  constantes : const <String>[]  /  const <AppUser>[].
+
+--------------------------------------------------------------------------------
+10.7 Fonctions
+--------------------------------------------------------------------------------
+    int add(int a, int b) { return a + b; }     // forme classique
+    int add(int a, int b) => a + b;             // forme « flèche » : une expression
+
+  Paramètres :
+    f(int a, int b)                  positionnels, obligatoires
+    f(int a, [int b = 0])            positionnels optionnels
+    f({required String name, int age = 0})   NOMMÉS (entre accolades) ;
+                                     « required » les rend obligatoires
+    Appel nommé :  sendRequest(fromUid: me, toUid: other)
+  Les paramètres nommés rendent l'appel lisible ; le projet les utilise pour
+  toute fonction de plus d'un argument.
+
+  Fonctions anonymes (lambdas / closures) :
+    (post) => post.id
+    (value) { return value == null; }
+  Une closure « capture » les variables de son contexte.
+
+  Fonctions comme valeurs :
+    typedef-like : String? Function(String?)     // type d'une fonction
+    static String? Function(String?) maxLength(int max) {
+      return (value) => ...;                     // retourne une fonction
+    }                                            // [validators.dart]
+    VoidCallback = void Function()               // alias fourni par Flutter
+    ValueChanged<T> = void Function(T)
+
+  Tear-off (passer une méthode sans l'appeler, sans parenthèses) :
+    .map(userById)            // équivaut à .map((uid) => userById(uid))
+    textInput.addListener(notifyListeners);
+
+  Fonction immédiatement appelée :  body: () { ... }(),  utilisée dans
+  profile_screen.dart pour écrire des « if / return » dans un paramètre.
+
+--------------------------------------------------------------------------------
+10.8 Classes
+--------------------------------------------------------------------------------
+    class AppUser {
+      const AppUser({required this.uid, required this.name, this.bio = ''});
+      final String uid;
+      final String name;
+      final String bio;
+    }
+
+  - this.uid dans les paramètres : « initializing formal » (raccourci qui
+    affecte le champ directement).
+  - const devant le constructeur : permet de créer des objets constants.
+  - Constructeur nommé :   const ModerationResult.approved() : ...
+  - Liste d'initialisation (après les deux-points), exécutée AVANT le corps :
+        const ModerationResult.approved()
+            : isPublishable = true, category = ModerationCategory.none, reason = '';
+        PostComposerController({...}) : _postService = postService, ... { corps }
+  - Factory constructor : peut retourner une instance existante ou calculée :
+        factory AppUser.fromMap(Map<String, dynamic> map, {required String id}) {
+          return AppUser(uid: id, ...);
+        }
+  - Super-paramètres (Dart 2.17+) : transmettre aux parents sans les répéter :
+        FeedController({required super.postService, required super.viewerId})
+  - Getters (propriété calculée, sans parenthèses à l'appel) :
+        bool get hasPhotos => photoUrls.isNotEmpty;
+  - Setters : set name(String v) { ... }  (rares ici : on préfère des méthodes).
+  - static : appartient à la classe, pas à l'instance (AppConstants.feedPageSize).
+  - Surcharge d'opérateur : bool operator ==(Object other) ; avec hashCode.
+  - Cascade « .. » : plusieurs appels sur le même objet :
+        textInput..removeListener(notifyListeners)..dispose();
+  - Méthode copyWith : crée un nouvel objet avec quelques champs modifiés.
+    C'est le style « immuable » : on ne modifie pas, on remplace.
+  - @immutable (annotation) : demande à l'analyseur de vérifier que tous les
+    champs sont final.
+  - @override : indique qu'on redéfinit un membre du parent / de l'interface.
+
+--------------------------------------------------------------------------------
+10.9 Héritage, interfaces, mixins et modificateurs (Dart 3)
+--------------------------------------------------------------------------------
+    class BaseController extends ChangeNotifier          // hérite
+    class MockAuthService implements AuthService         // respecte le contrat
+    abstract class PostListController ...                // non instanciable
+    abstract interface class AuthService                 // pur contrat
+    final class AuthController                           // ne peut être étendue
+    abstract final class AppConfig                       // ni instanciée ni étendue
+                                                         // (classe « de constantes »)
+
+  - extends : réutilise l'implémentation du parent (une seule superclasse).
+  - implements : s'engage à fournir TOUTES les méthodes de l'interface ;
+    on peut implémenter plusieurs interfaces.
+  - abstract : méthodes sans corps, à définir dans les sous-classes.
+  - interface class : ne peut qu'être implémentée hors de sa bibliothèque.
+  - final class : empêche l'héritage hors de la bibliothèque (design fermé).
+  - super.dispose(), super.notifyListeners() : appelle le parent.
+  - Mixin (non utilisé ici, mais à connaître) : fragment de comportement
+    réutilisable par « with » :
+        mixin Logging { void log(String m) => print(m); }
+        class A extends B with Logging { }
+    On a choisi l'héritage (PostListController) car le comportement partagé
+    dépend déjà de BaseController.
+
+--------------------------------------------------------------------------------
+10.10 Énumérations
+--------------------------------------------------------------------------------
+Dart 2.17 : les enum peuvent avoir des champs, un constructeur et des méthodes.
+    enum PostStatus {
+      published('publiee'),
+      pending('en_attente');
+      const PostStatus(this.value);
+      final String value;
+      static PostStatus fromValue(String? v) => values.firstWhere(...);
+    }
+  - values : liste de toutes les valeurs.
+  - Utilisation : PostStatus.pending ; le compilateur vérifie l'exhaustivité
+    des switch sur une enum.
+
+--------------------------------------------------------------------------------
+10.11 Extensions
+--------------------------------------------------------------------------------
+Ajoutent des membres à un type existant sans l'étendre :
+    extension StringInitials on String {
+      String get initials => ...;
+    }
+    'Amal Ben Salah'.initials   // « AB »                [string_extensions.dart]
+    extension PostVisibilityLabels on PostVisibility { String get label ... }
+
+--------------------------------------------------------------------------------
+10.12 Génériques
+--------------------------------------------------------------------------------
+Un type paramétré par un autre type :
+    List<Post>, Map<String, Post>, Stream<List<Comment>>, Future<bool>
+    Stream<T> watch<T>(T Function() query) async* { ... }  // méthode générique
+    class PostItem<T extends PostListController> extends StatelessWidget
+        // T est limité aux sous-classes de PostListController ; context.read<T>()
+        // retrouve alors le bon contrôleur dans l'arbre de widgets.
+
+--------------------------------------------------------------------------------
+10.13 Programmation asynchrone
+--------------------------------------------------------------------------------
+Dart est mono-thread : les opérations lentes (réseau, base) ne bloquent pas, elles
+retournent un Future ou un Stream.
+
+  Future<T>  : une valeur disponible PLUS TARD (une seule).
+      Future<void> signOut() async { ... }
+      final result = await moderate(...);     // await : attend le résultat
+      Future<void>.delayed(const Duration(milliseconds: 350));  // simule la latence
+      future.timeout(AppConstants.aiTimeout)  // TimeoutException si trop long
+    - async : la fonction retourne un Future et peut utiliser await.
+    - await ne bloque pas l'interface : le code reprend quand le Future se termine.
+    - unawaited(f) : « je n'attends pas volontairement » (règle unawaited_futures).
+
+  Stream<T>  : une SUITE de valeurs dans le temps (temps réel).
+      Stream<List<Post>> watchFeed(...);
+      final sub = stream.listen((posts) { ... }, onError: _onError);
+      await sub.cancel();       // indispensable dans dispose() sinon fuite mémoire
+    - Stream.distinct() ignore les valeurs identiques consécutives.
+    - StreamController<void>.broadcast() : crée un flux à plusieurs écouteurs.
+
+  Générateurs :
+      Stream<T> watch<T>(T Function() query) async* {
+        yield query();                          // émet une valeur
+        await for (final _ in _changes.stream) {  // pour chaque événement reçu
+          yield query();
+        }
+      }
+      yield* autreFlux;                         // relaie tout un autre flux
+    async* produit un Stream ; yield émet ; « await for » parcourt un Stream.
+
+  Timer(Duration, callback) : exécute une action après un délai ; annulable
+  (anti-rebond de la recherche).
+
+--------------------------------------------------------------------------------
+10.14 Gestion des erreurs
+--------------------------------------------------------------------------------
+    try {
+      await action();
+      return true;
+    } on AppException catch (error) {       // type précis
+      _errorMessage = error.message;
+    } on Exception {                       // tout ce qui est une Exception
+      ...
+    } catch (_) {                          // n'importe quoi (Error comprises)
+      ...
+    } finally {                            // toujours exécuté
+      notifyListeners();
+    }
+    throw const AppException('Membre introuvable.');   // lever une erreur
+  - Exception : erreur attendue et récupérable (réseau, délai, format).
+  - Error : bogue de programmation (ne pas l'attraper en général).
+  - FormatException : donnée mal formée (réponse d'IA invalide).
+  - UnimplementedError : « à écrire » (services Firebase vides).
+
+--------------------------------------------------------------------------------
+10.15 Records, patterns et déstructuration (Dart 3)
+--------------------------------------------------------------------------------
+    for (final MapEntry(:key, :value) in _keywords.entries) { ... }
+        // motif d'objet : extrait key et value de chaque entrée
+    case PublishOutcome.rejected || PublishOutcome.invalid:
+        // motif « ou » : deux valeurs, un seul traitement
+    if (raw is! List<dynamic>) { throw ... }    // test de type
+  (Les « records », tuples comme (int, String), existent aussi mais ne sont pas
+  nécessaires dans ce projet.)
+
+--------------------------------------------------------------------------------
+10.16 switch moderne (expression et instruction)
+--------------------------------------------------------------------------------
+  Expression : retourne une valeur, sans break, exhaustive :
+      return switch (status) {
+        AuthStatus.unknown => const SplashScreen(),
+        AuthStatus.authenticated => const HomeShell(),
+        AuthStatus.unauthenticated => const LoginScreen(),
+      };                                                   [auth_gate.dart]
+      _ => null      // « _ » : cas par défaut
+  Instruction (new_post_screen.dart) : les cas ne « tombent » plus dans le
+  suivant ; pas de break nécessaire ; le compilateur vérifie que tous les cas
+  de l'enum sont traités (exhaustivité).
+
+--------------------------------------------------------------------------------
+10.17 Expressions utiles supplémentaires
+--------------------------------------------------------------------------------
+  - Opérateur ternaire dans l'interface :
+        icon: Icon(post.likedByViewer ? Icons.favorite : Icons.favorite_border)
+  - Cast :  value as String?    (peut lever une erreur si le type est faux)
+  - Test de type :  raw is String
+  - Littéral de liste typé :  <Widget>[ ... ]  (clarifie l'inférence)
+  - Constantes d'énumération qualifiées : AppRoutes.register (comparées dans un
+    switch comme motifs constants).
+
+--------------------------------------------------------------------------------
+10.18 Documentation et analyse du code
+--------------------------------------------------------------------------------
+  - /// Documente la ligne suivante (classe, méthode, champ).
+  - analysis_options.yaml configure l'analyseur : prefer_single_quotes,
+    prefer_final_locals, always_declare_return_types, require_trailing_commas
+    (virgules finales : meilleure mise en forme avec « dart format »),
+    unawaited_futures, avoid_print.
+  - Commandes utiles :
+        dart format lib test        // formate le code
+        flutter analyze             // analyse statique
+        flutter test                // lance les tests
+
+
+================================================================================
+11. CONCEPTS FLUTTER UTILISÉS
+================================================================================
+
+Widget
+  Tout est un widget : un morceau d'interface décrit de façon déclarative
+  (Text, Row, Column, Scaffold, ListView...). L'interface est une fonction de
+  l'état : quand l'état change, on reconstruit.
+
+StatelessWidget / StatefulWidget
+  - StatelessWidget : pas d'état interne (PostCard, UserAvatar, la plupart des
+    écrans). Méthode build(BuildContext context).
+  - StatefulWidget : possède un objet State qui garde des données locales
+    (FeedScreen : ScrollController ; LoginScreen : champs de saisie).
+    Cycle de vie : initState() -> build() -> dispose(). On libère dans dispose()
+    tout ce qu'on a créé (controllers, abonnements).
+  - setState(() { ... }) : demande la reconstruction d'un StatefulWidget
+    (utilisé pour de petits états locaux : point actif du carrousel, mot de
+    passe visible).
+
+BuildContext
+  Position du widget dans l'arbre. Sert à retrouver des objets « au-dessus »
+  (Theme.of(context), Navigator.of(context), context.read<T>()).
+  Après un await, on vérifie context.mounted / mounted avant de réutiliser le
+  contexte (le widget a pu être retiré de l'écran).
+
+Mise en page
+  Row / Column (horizontal / vertical), Expanded / Flexible (partage de
+  l'espace), Stack / Positioned (superposition), Padding, SizedBox, Card,
+  ListTile, ListView / ListView.builder (liste défilante, le builder ne crée que
+  les éléments visibles : essentiel pour la fluidité avec des dizaines de
+  publications), PageView (pages glissantes du carrousel), TabBar / TabBarView
+  (onglets), NavigationBar (navigation du bas), IndexedStack (garde les trois
+  onglets en vie).
+
+Formulaires
+  Form + GlobalKey<FormState> + TextFormField(validator: ...) :
+  _formKey.currentState!.validate() exécute les validateurs.
+  TextEditingController lit et modifie le texte d'un champ.
+
+Navigation
+  Navigator.of(context).pushNamed(route, arguments: ...), pop(), popUntil(...).
+  MaterialApp.onGenerateRoute construit l'écran de la route demandée.
+
+provider (gestion d'état)
+  - ChangeNotifier : classe qui appelle notifyListeners() quand son état change.
+  - ChangeNotifierProvider(create: ...) : crée un ChangeNotifier, le met à
+    disposition de ses descendants et appelle dispose() à la destruction.
+  - Provider<T> : fournit un objet immuable (un service).
+  - context.read<T>() : récupère sans écouter (dans un callback).
+  - context.watch<T>() : récupère ET reconstruit à chaque changement (dans
+    build).
+  - context.select<T, R>((t) => t.champ) : reconstruit seulement si champ change.
+
+Material 3, thèmes et accessibilité
+  ThemeData(useMaterial3: true) ; Theme.of(context).colorScheme pour les
+  couleurs (jamais de couleur écrite en dur quand un rôle existe) ; Semantics et
+  tooltip pour les lecteurs d'écran.
+
+Plugins
+  - image_picker : galerie et appareil photo ;
+  - cached_network_image : images distantes avec cache et indicateur ;
+  - intl : formatage de dates (initializeDateFormatting('fr_FR') dans main()).
+
+
+================================================================================
+12. TESTS, QUALITÉ, LIMITES ET ÉVOLUTIONS
+================================================================================
+
+12.1 Tests
+  test/moderation_result_test.dart vérifie la validation de la réponse de l'IA
+  (réponse valide, catégorie non autorisée, type incorrect), l'extraction des
+  légendes et le validateur d'e-mail :  flutter test
+  Les contrôleurs se testent facilement : on leur passe les services simulés
+  (MockDatabase + MockPostService...) sans aucune interface graphique.
+  Pistes : tester FeedController.loadMore (pagination), PostComposerController
+  .publish (les trois issues : publiée, refusée, en attente) et la règle de
+  visibilité de MockDatabase.
+
+12.2 Limites connues de cette livraison
+  - Le code n'a pas pu être compilé dans l'environnement de génération : lancez
+    « flutter pub get » puis « flutter analyze ». Si une signature de plugin
+    a changé dans votre version (par exemple pickMultiImage), la correction se
+    fait dans UNE seule classe : lib/services/photo_picker_service.dart.
+  - Les données simulées sont locales à l'appareil et non persistantes.
+  - Les photos ne sont pas réellement compressées en mode simulé (la qualité et
+    la largeur sont limitées à la sélection par image_picker) ; la compression
+    à 512 px pour l'IA et avant envoi est à écrire dans les services Firebase.
+  - F9 (notifications) et F10 (signalement, administrateur) ne sont pas
+    implémentés.
+  - Une publication « en_attente » n'est pas encore re-vérifiée
+    automatiquement.
+  - Les libellés sont écrits en français directement dans les vues.
+
+12.3 Évolutions faciles grâce à l'architecture
+  - F9 : ajouter NotificationService (interface) + NotificationController ;
+    le mock peut s'appuyer sur MockDatabase.changes ; Firebase sur les
+    snapshots + flutter_local_notifications.
+  - F10 : ajouter Report (modèle), ReportService, un rôle « admin » dans
+    AppUser et un écran de modération.
+  - Autre backend (Supabase, API REST) : écrire de nouvelles implémentations des
+    mêmes interfaces et les fournir dans app_providers.dart.
+  - Internationalisation : remplacer les textes des vues par des clés ARB.
+
+================================================================================
+ FIN DE LA DOCUMENTATION
+================================================================================
